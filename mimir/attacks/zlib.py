@@ -6,7 +6,7 @@ import torch as ch
 import zlib
 
 from mimir.attacks.all_attacks import Attack
-from mimir.models import Model
+from mimir.my_models import Model
 from mimir.config import ExperimentConfig
 
 

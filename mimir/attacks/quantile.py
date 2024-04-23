@@ -3,7 +3,7 @@
     https://arxiv.org/pdf/2307.03694.pdf
 """
 import torch as ch
-from mimir.models import QuantileReferenceModel, Model
+from mimir.my_models import QuantileReferenceModel, Model
 from transformers import TrainingArguments
 from sklearn.metrics import mean_squared_error
 from transformers import TrainingArguments, Trainer

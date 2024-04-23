@@ -24,7 +24,7 @@ from mimir.config import (
 import mimir.data_utils as data_utils
 import mimir.plot_utils as plot_utils
 from mimir.utils import fix_seed
-from mimir.models import LanguageModel, ReferenceModel, OpenAI_APIModel
+from mimir.my_models import LanguageModel, ReferenceModel, OpenAI_APIModel
 from mimir.attacks.all_attacks import AllAttacks, Attack
 from mimir.attacks.utils import get_attacker
 from mimir.attacks.attack_utils import (
@@ -431,18 +431,17 @@ def main(config: ExperimentConfig):
 
     # define SAVE_FOLDER as the timestamp - base model name - mask filling model name
     # create it if it doesn't exist
-    output_subfolder = f"{config.output_name}/"
+    # output_subfolder = f"{config.output_name}/"
     if openai_config is None:
         base_model_name = config.base_model.replace("/", "_")
     else:
         base_model_name = "openai-" + openai_config.model.replace("/", "_")
 
-    exp_name = config.experiment_name
 
     # Add pile source to suffix, if provided
     # TODO: Shift dataset-specific processing to their corresponding classes
     # Results go under target model
-    sf = os.path.join(exp_name, config.base_model.replace("/", "_"))
+    sf = os.path.join(config.experiment_name, config.base_model.replace("/", "_"))
     if config.specific_source is not None:
         processed_source = data_utils.sourcename_process(config.specific_source)
         sf = os.path.join(sf, processed_source)
@@ -461,7 +460,7 @@ def main(config: ExperimentConfig):
 
     if neigh_config:
         n_perturbation_list = neigh_config.n_perturbation_list
-        in_place_swap = neigh_config.original_tokenization_swap
+        in_place_swap = neigh_config.original_tokenization_swap # default true
         # n_similarity_samples = args.n_similarity_samples # NOT USED
 
     cache_dir = env_config.cache_dir
@@ -485,6 +484,7 @@ def main(config: ExperimentConfig):
         }
 
     # Prepare attackers
+    # attackers_dict is a map:str->object containing the attack name and the instantiated attack object
     attackers_dict = get_attackers(base_model, ref_models, config)
 
     # Load neighborhood attack model, only if we are doing the neighborhood attack AND generating neighbors
@@ -500,7 +500,7 @@ def main(config: ExperimentConfig):
     print("MOVING BASE MODEL TO GPU...", end="", flush=True)
     base_model.load()
 
-    print(f"Loading dataset {config.dataset_nonmember}...")
+    print(f"Loading nonmember dataset {config.dataset_nonmember}...")
     # data, seq_lens, n_samples = generate_data(config.dataset_member)
     data_obj_nonmem, data_nonmember = generate_data(
         config.dataset_nonmember,
@@ -508,7 +508,7 @@ def main(config: ExperimentConfig):
         presampled=config.presampled_dataset_nonmember,
         mask_model_tokenizer=mask_model.tokenizer if mask_model else None,
     )
-    print(f"Loading dataset {config.dataset_member}...")
+    print(f"Loading member dataset {config.dataset_member}...")
     data_obj_mem, data_member = generate_data(
         config.dataset_member,
         presampled=config.presampled_dataset_member,
@@ -725,5 +725,7 @@ if __name__ == "__main__":
 
     # Fix randomness
     fix_seed(config.random_seed)
+    print(config)
+    exit()
     # Call main function
     main(config)

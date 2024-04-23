@@ -3,7 +3,7 @@
 """
 import torch
 import torch.nn as nn
-import openai
+# import openai
 from typing import List
 import numpy as np
 import transformers
@@ -12,7 +12,7 @@ from collections import defaultdict
 from multiprocessing.pool import ThreadPool
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from hf_olmo import *
+# from hf_olmo import *
 
 from mimir.config import ExperimentConfig
 from mimir.custom_datasets import SEPARATOR
@@ -67,7 +67,7 @@ class Model(nn.Module):
             pass
         print(f'DONE ({time.time() - start:.2f}s)')
 
-    def get_probabilities(self,
+    def get_token_logprob(self,
                           text: str,
                           tokens: np.ndarray = None,
                           no_grads: bool = True,
@@ -77,7 +77,7 @@ class Model(nn.Module):
             Args:
                 text (str): The input text for which to calculate probabilities.
                 tokens (numpy.ndarray, optional): An optional array of token ids. If provided, these tokens
-                are used instead of tokenizing the input text. Defaults to None.
+                are used instead of tokenizing the input text. Defaults to None. tokens are unnecessary if text and tokenizer is provided.
 
             Raises:
                 ValueError: If the device or name attributes of the instance are not set.
@@ -99,52 +99,75 @@ class Model(nn.Module):
                     text, return_tensors="pt")
                 labels = tokenized.input_ids
 
-            target_token_log_prob = []
-            all_token_log_prob = []
+            target_log_prob = []
+            all_log_prob = []
             for i in range(0, labels.size(1), self.stride):
                 begin_loc = max(i + self.stride - self.max_length, 0)
                 end_loc = min(i + self.stride, labels.size(1))
                 trg_len = end_loc - i  # may be different from stride on last loop
                 input_ids = labels[:, begin_loc:end_loc].to(self.device)
-                target_ids = input_ids.clone()
-                target_ids[:, :-trg_len] = -100
+                #target_ids = input_ids.clone()
+                #target_ids[:, :-trg_len] = -100
 
-                logits = self.model(input_ids, labels=target_ids).logits
+                logits = self.model(input_ids).logits
                 if no_grads:
                     logits = logits.cpu()
-                shift_logits = logits[..., :-1, :].contiguous()
-                log_probabilities = torch.nn.functional.log_softmax(shift_logits, dim=-1)
-                shift_labels = target_ids[..., 1:]
-                if no_grads:
-                    shift_labels = shift_labels.cpu()
-                shift_labels = shift_labels.contiguous()
-                labels_processed = shift_labels[0]
+                logits = logits[0,:-1,:].contiguous()
+                logits = logits[-trg_len:,:]
+                
+                #(bs=1, vocab_size)
+                #shift_logits = logits[..., :-1, :].contiguous()
+                #(bs=1, vocab_size)
+                log_probabilities = torch.nn.functional.log_softmax(logits, dim=-1)
+                # shift_labels = target_ids[..., 1:]
+                # if no_grads:
+                #     shift_labels = shift_labels.cpu()
+                # shift_labels = shift_labels.contiguous()
+                # labels_processed = shift_labels[0]
 
-                del input_ids
-                del target_ids
+                target_ids = labels[0, begin_loc:end_loc]
+                target_ids = target_ids[1:]
+                target_ids = target_ids[-trg_len:]
+                assert target_ids.shape[0] == logits.shape[0]
 
-                for i, token_id in enumerate(labels_processed):
-                    if token_id != -100:
-                        log_probability = log_probabilities[0, i, token_id]
-                        if no_grads:
-                            log_probability = log_probability.item()
-                        target_token_log_prob.append(log_probability)
-                        all_token_log_prob.append(log_probabilities[0, i])
+                segment_target_log_prob = torch.gather(log_probabilities, 1, target_ids.unsqueeze(1)).squeeze(1)
+                target_log_prob.append(segment_target_log_prob)
+                all_log_prob.append(log_probabilities)
+
+            target_log_prob = torch.cat(target_log_prob, dim=0)
+            all_log_prob = torch.cat(all_log_prob, dim=0)
             
-            # Should be equal to # of tokens - 1 to account for shift
-            assert len(target_token_log_prob) == labels.size(1) - 1
-            all_token_log_prob = torch.stack(all_token_log_prob, dim=0)
-            assert len(target_token_log_prob) == len(all_token_log_prob)
+            if not return_all_probs:
+                return target_log_prob 
+            return target_log_prob, all_log_prob
+                
 
-        if not no_grads:
-            target_token_log_prob = torch.stack(target_token_log_prob)
 
-        if not return_all_probs:
-            return target_token_log_prob
-        return target_token_log_prob, all_token_log_prob
+                # del input_ids
+                # del target_ids
+
+            #     for i, token_id in enumerate(labels_processed):
+            #         if token_id != -100:
+            #             log_probability = log_probabilities[0, i, token_id]
+            #             if no_grads:
+            #                 log_probability = log_probability.item()
+            #             target_token_log_prob.append(log_probability)
+            #             all_token_log_prob.append(log_probabilities[0, i])
+            
+            # # Should be equal to # of tokens - 1 to account for shift
+            # assert len(target_token_log_prob) == labels.size(1) - 1
+            # all_token_log_prob = torch.stack(all_token_log_prob, dim=0)
+            # assert len(target_token_log_prob) == len(all_token_log_prob)
+
+        # if not no_grads:
+        #     target_token_log_prob = torch.stack(target_token_log_prob)
+
+        # if not return_all_probs:
+        #     return target_token_log_prob
+        # return target_token_log_prob, all_token_log_prob
 
     @torch.no_grad()
-    def get_ll(self,
+    def get_loss(self,
                text: str,
                tokens: np.ndarray=None,
                probs = None):
@@ -159,7 +182,13 @@ class Model(nn.Module):
                 are used instead of calling the `get_probabilities` method. Defaults to None.
         """
         all_prob = probs if probs is not None else self.get_probabilities(text, tokens=tokens)
-        return -np.mean(all_prob)
+        # return -np.mean(all_prob)
+        if isinstance(all_prob,torch.tensor):
+            return -torch.mean(all_prob).item()
+        elif isinstance(all_prob,list):
+            return -np.mean(all_prob)  
+
+        
 
     def load_base_model_and_tokenizer(self, model_kwargs):
         """
@@ -172,14 +201,15 @@ class Model(nn.Module):
             print(f'Loading BASE model {self.name}...')
             device_map = self.device_map # if self.device_map else 'cpu'
             if "silo" in self.name or "balanced" in self.name:
-                from utils.transformers.model import OpenLMforCausalLM
-                model = OpenLMforCausalLM.from_pretrained(
-                    self.name, **model_kwargs, device_map=self.device, cache_dir=self.cache_dir)
-                # Extract the model from the model wrapper so we dont need to call model.model
+                raise NotImplementedError
+            #     from utils.transformers.model import OpenLMforCausalLM
+            #     model = OpenLMforCausalLM.from_pretrained(
+            #         self.name, **model_kwargs, device_map=self.device, cache_dir=self.cache_dir)
+            #     # Extract the model from the model wrapper so we dont need to call model.model
             elif "llama" in self.name or "alpaca" in self.name:
                 # TODO: This should be smth specified in config in case user has
                 # llama is too big, gotta use device map
-                model = transformers.AutoModelForCausalLM.from_pretrained(self.name, **model_kwargs, device_map="balanced_low_0", cache_dir=self.cache_dir)
+                model = transformers.AutoModelForCausalLM.from_pretrained(self.name, **model_kwargs, cache_dir=self.cache_dir)
                 self.device = 'cuda:1'
             elif "stablelm" in self.name.lower():  # models requiring custom code
                 model = transformers.AutoModelForCausalLM.from_pretrained(
@@ -357,66 +387,103 @@ class LanguageModel(Model):
 
     # TODO extend for longer sequences
     @torch.no_grad()
-    def get_lls(self, texts: List[str], batch_size: int = 6):
+    def get_batch_token_logprob(self, texts: List[str], batch_size: int = 6):
         #return [self.get_ll(text) for text in texts] # -np.mean([self.get_ll(text) for text in texts])
         # tokenized = self.tokenizer(texts, return_tensors="pt", padding=True)
         # labels = tokenized.input_ids
         total_size = len(texts)
+        target_logprob = defaultdict(list)
         losses = []
-        for i in range(0, total_size, batch_size):
+        for batch_idx in range(0, total_size, batch_size):
             # Delegate batches and tokenize
-            batch = texts[i:i+batch_size]
+            batch = texts[batch_idx: batch_idx+batch_size]
+            # no max_length no truncation
             tokenized = self.tokenizer(batch, return_tensors="pt", padding=True, return_attention_mask=True)
-            label_batch = tokenized.input_ids
-            
+            batch_input_id = tokenized.input_ids
+            batch_attention_mask = tokenized.attention_mask
             # # mask out padding tokens
-            attention_mask = tokenized.attention_mask
-            assert attention_mask.size() == label_batch.size()
+            #attention_mask = tokenized.attention_mask
+            # assert attention_mask.size() == label_batch.size()
 
-            needs_sliding = label_batch.size(1) > self.max_length // 2
-            if not needs_sliding:
-                label_batch = label_batch.to(self.device)
-                attention_mask = attention_mask.to(self.device)
+            # needs_sliding = label_batch.size(1) > self.max_length // 2
+            # if not needs_sliding:
+            #     label_batch = label_batch.to(self.device)
+            #     attention_mask = attention_mask.to(self.device)
 
             # Collect token probabilities per sample in batch
-            all_prob = defaultdict(list)
-            for i in range(0, label_batch.size(1), self.stride):
-                begin_loc = max(i + self.stride - self.max_length, 0)
-                end_loc = min(i + self.stride, label_batch.size(1))
-                trg_len = end_loc - i  # may be different from stride on last loop
-                input_ids = label_batch[:, begin_loc:end_loc]
-                mask = attention_mask[:, begin_loc:end_loc]
-                if needs_sliding:
-                    input_ids = input_ids.to(self.device)
-                    mask = mask.to(self.device)
-                    
-                target_ids = input_ids.clone()
+            for segment_idx in range(0, batch_input_id.size(1), self.stride):
+                begin_loc = max(segment_idx + self.stride - self.max_length, 0)
+                end_loc = min(segment_idx + self.stride, label_batch.size(1))
+                trg_len = end_loc - segment_idx  # may be different from stride on last loop
+                segment_input_ids = batch_input_id[:, begin_loc:end_loc]
+                segment_attention_mask = batch_attention_mask[:, begin_loc:end_loc]
+                # if needs_sliding:
+                #     input_ids = input_ids.to(self.device)
+                #     mask = mask.to(self.device)
+
+                #target_ids = input_ids.clone()
                 # Don't count padded tokens or tokens that already have computed probabilities
-                target_ids[:, :-trg_len] = -100
+                #target_ids[:, :-trg_len] = -100
                 # target_ids[attention_mask == 0] = -100
+                logits = self.model(input_ids = segment_input_ids.to(self.device), attention_mask = segment_attention_mask.to(self.device)).logits.cpu()
+
+                for i in range(logits.size(0)):
+                    # begin to deal each instance in the current batch and current segment
+                    rel_len = torch.sum(segment_attention_mask[i],dim=0).item()
+                    if rel_len <= self.stride + 1:
+                        continue
+                    logits = logits[i,:rel_len,:]
+                    shift_logits = logits[:-1, :].contiguous()
+                    probabilities = torch.nn.functional.log_softmax(shift_logits, dim=-1)
+                    probabilities = probabilities[-trg_len:,:].contiguous()
+                    
+                    labels = segment_input_ids[i, :rel_len]
+                    shift_labels = labels[1:]
+                    shift_labels = labels[i, -trg_len:].contiguous()
+                    assert shift_labels.shape[0] == probabilities.shape[0]
+
+                    segment_target_logprob = torch.gather(probabilities, 1, shift_labels.unsqueeze(1)).squeeze(1).tolist()
+                    target_logprob[batch_idx*batch_size + i].extend(segment_target_logprob) 
+                    # for i, sample in enumerate(shift_labels):
+                    #     for j, token_id in enumerate(sample):
+                    #         if token_id != -100 and token_id != self.tokenizer.pad_token_id:
+                    #             probability = probabilities[i, j, token_id].item()
+                    #             all_prob[i].append(probability)
+
+
+                    # del input_ids
+                    # del mask
+        return target_logprob
+
+
+            #     shift_logits = logits[..., :-1, :].contiguous()
+            #     probabilities = torch.nn.functional.log_softmax(shift_logits, dim=-1)
                 
-                logits = self.model(input_ids, labels=target_ids, attention_mask=mask).logits.cpu()
-                target_ids = target_ids.cpu()
-                shift_logits = logits[..., :-1, :].contiguous()
-                probabilities = torch.nn.functional.log_softmax(shift_logits, dim=-1)
-                shift_labels = target_ids[..., 1:].contiguous()
+            #     shift_labels = target_ids[..., 1:].contiguous()
 
-                for i, sample in enumerate(shift_labels):
-                    for j, token_id in enumerate(sample):
-                        if token_id != -100 and token_id != self.tokenizer.pad_token_id:
-                            probability = probabilities[i, j, token_id].item()
-                            all_prob[i].append(probability)
+            #     shift_labels = shift_labels[:, -trg_len:]
+            #     probabilities = probabilities[:, -trg_len:,:]
 
-                del input_ids
-                del mask
+            #     assert shift_labels.shape[1] == probabilities.shape[1]
+
+            #     all_prob[i] = torch.gather(probabilities, 2, shift_labels.unsqueeze(2)).squeeze(2).tolist()
+            #     # for i, sample in enumerate(shift_labels):
+            #     #     for j, token_id in enumerate(sample):
+            #     #         if token_id != -100 and token_id != self.tokenizer.pad_token_id:
+            #     #             probability = probabilities[i, j, token_id].item()
+            #     #             all_prob[i].append(probability)
+
+            #     # del input_ids
+            #     # del mask
+                
             
-            # average over each sample to get losses
-            batch_losses = [-np.mean(all_prob[idx]) for idx in range(label_batch.size(0))]
-            # print(batch_losses)
-            losses.extend(batch_losses)
-            del label_batch
-            del attention_mask
-        return losses #np.mean(losses)
+            # # average over each sample to get losses
+            # batch_losses = [-np.mean(all_prob[idx]) for idx in range(label_batch.size(0))]
+            # # print(batch_losses)
+            # losses.extend(batch_losses)
+            # del label_batch
+            # del attention_mask
+        #return losses #np.mean(losses)
 
     def sample_from_model(self, texts: List[str], **kwargs):
         """
@@ -531,21 +598,21 @@ class OpenAI_APIModel(LanguageModel):
         """
         return self.API_TOKEN_COUNTER
 
-    @torch.no_grad()
-    def get_ll(self, text: str):
-        """
-            Get the log likelihood of each text under the base_model
-        """
-        openai_config = self.config.openai_config
+    # @torch.no_grad()
+    # def get_ll(self, text: str):
+    #     """
+    #         Get the log likelihood of each text under the base_model
+    #     """
+    #     openai_config = self.config.openai_config
 
-        kwargs = {"engine": openai_config.model, "temperature": 0, "max_tokens": 0, "echo": True, "logprobs": 0}
-        r = openai.Completion.create(prompt=f"<|endoftext|>{text}", **kwargs)
-        result = r['choices'][0]
-        tokens, logprobs = result["logprobs"]["tokens"][1:], result["logprobs"]["token_logprobs"][1:]
+    #     kwargs = {"engine": openai_config.model, "temperature": 0, "max_tokens": 0, "echo": True, "logprobs": 0}
+    #     r = openai.Completion.create(prompt=f"<|endoftext|>{text}", **kwargs)
+    #     result = r['choices'][0]
+    #     tokens, logprobs = result["logprobs"]["tokens"][1:], result["logprobs"]["token_logprobs"][1:]
 
-        assert len(tokens) == len(logprobs), f"Expected {len(tokens)} logprobs, got {len(logprobs)}"
+    #     assert len(tokens) == len(logprobs), f"Expected {len(tokens)} logprobs, got {len(logprobs)}"
 
-        return np.mean(logprobs)
+    #     return np.mean(logprobs)
 
     @torch.no_grad()
     def get_ref(self, text: str, ref_model: ReferenceModel):
@@ -573,18 +640,18 @@ class OpenAI_APIModel(LanguageModel):
         pool = ThreadPool(self.config.batch_size)
         return pool.map(self.get_ll, texts)
 
-    def _openai_sample(self, p: str):
-        openai_config = self.config.openai_config
-        if self.config.dataset_member != 'pubmed':  # keep Answer: prefix for pubmed
-            p = drop_last_word(p)
+    # def _openai_sample(self, p: str):
+    #     openai_config = self.config.openai_config
+    #     if self.config.dataset_member != 'pubmed':  # keep Answer: prefix for pubmed
+    #         p = drop_last_word(p)
 
-        # sample from the openai model
-        kwargs = { "engine": openai_config.model, "max_tokens": 200 }
-        if self.config.do_top_p:
-            kwargs['top_p'] = self.config.top_p
+    #     # sample from the openai model
+    #     kwargs = { "engine": openai_config.model, "max_tokens": 200 }
+    #     if self.config.do_top_p:
+    #         kwargs['top_p'] = self.config.top_p
     
-        r = openai.Completion.create(prompt=f"{p}", **kwargs)
-        return p + r['choices'][0].text
+    #     r = openai.Completion.create(prompt=f"{p}", **kwargs)
+    #     return p + r['choices'][0].text
 
 
     def sample_from_model(self, texts: List[str], **kwargs):

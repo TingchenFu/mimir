@@ -28,7 +28,7 @@ from mimir.config import (
 import mimir.data_utils as data_utils
 import mimir.plot_utils as plot_utils
 from mimir.utils import fix_seed
-from mimir.models import LanguageModel, ReferenceModel
+from mimir.my_models import LanguageModel, ReferenceModel
 from mimir.attacks.all_attacks import AllAttacks, Attack
 from mimir.attacks.neighborhood import T5Model, BertModel, NeighborhoodAttack
 from mimir.attacks.utils import get_attacker

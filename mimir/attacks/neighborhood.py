@@ -13,7 +13,7 @@ from typing import List
 
 from mimir.config import ExperimentConfig
 from mimir.attacks.attack_utils import count_masks, apply_extracted_fills
-from mimir.models import Model, ReferenceModel
+from mimir.my_models import Model, ReferenceModel
 from mimir.attacks.all_attacks import Attack
 
 

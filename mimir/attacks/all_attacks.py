@@ -3,7 +3,7 @@
 """
 
 from enum import Enum
-from mimir.models import Model
+from mimir.my_models import Model
 
 
 # Attack definitions
