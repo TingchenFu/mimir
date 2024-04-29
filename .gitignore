@@ -59,6 +59,7 @@ table*/*
 fig7/*
 new_mi/*
 DEBUG/*
+tmp_dump/*
 
 # Ignore all tar.gz files
 *.tar.gz
