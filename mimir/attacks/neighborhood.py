@@ -13,7 +13,7 @@ from typing import List
 
 from mimir.config import ExperimentConfig
 from mimir.attacks.attack_utils import count_masks, apply_extracted_fills
-from mimir.my_models import Model, ReferenceModel
+from mimir.my_models import Model, LanguageModel
 from mimir.attacks.all_attacks import Attack
 
 
@@ -23,7 +23,7 @@ class NeighborhoodAttack(Attack):
         self,
         config: ExperimentConfig,
         target_model: Model,
-        ref_model: ReferenceModel = None,
+        ref_model: LanguageModel = None,
         **kwargs,
     ):
         super().__init__(config, target_model, ref_model=None)
@@ -129,13 +129,16 @@ class NeighborhoodAttack(Attack):
         substr_neighbors = kwargs.get("substr_neighbors", None)
         loss = kwargs.get("loss", None)
         if loss is None:
-            loss = self.target_model.get_ll(document, probs=probs, tokens=tokens)
-
+            loss = self.target_model.get_loss(document, probs=probs, tokens=tokens)
+        
         # Only evaluate neighborhood attack when not caching neighbors
-        mean_substr_score = self.target_model.get_lls(
+        neighbor_target_token_logporb = self.target_model.get_batch_token_logprob(
             substr_neighbors, batch_size=batch_size
         )
-        d_based_score = loss - mean_substr_score
+        mean_neighbor_loss = [np.mean(x) for x in neighbor_target_token_logporb]
+        mean_neighbor_loss = np.mean(mean_neighbor_loss)
+        
+        d_based_score = loss - mean_neighbor_loss
         return d_based_score
 
 

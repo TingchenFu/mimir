@@ -2,7 +2,7 @@
     Reference-based attacks.
 """
 from mimir.attacks.all_attacks import Attack
-from mimir.my_models import Model, ReferenceModel
+from mimir.my_models import Model, LanguageModel
 from mimir.config import ExperimentConfig
 
 
@@ -11,7 +11,7 @@ class ReferenceAttack(Attack):
     def __init__(
         self, config: ExperimentConfig,
         model: Model,
-        reference_model: ReferenceModel
+        reference_model: LanguageModel
     ):
         super().__init__(config, model, reference_model)
 
@@ -21,6 +21,6 @@ class ReferenceAttack(Attack):
         """
         loss = kwargs.get('loss', None)
         if loss is None:
-            loss = self.target_model.get_ll(document, probs=probs, tokens=tokens)
-        ref_loss = self.ref_model.get_ll(document, probs=probs, tokens=tokens)
+            loss = self.target_model.get_loss(document, probs=probs, tokens=tokens)
+        ref_loss = self.ref_model.get_loss(document, probs=probs, tokens=tokens)
         return loss - ref_loss

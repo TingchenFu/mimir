@@ -26,12 +26,13 @@ class MinKProbAttack(Attack):
         all_prob = (
             probs
             if probs is not None
-            else self.target_model.get_probabilities(document, tokens=tokens)
+            else self.target_model.get_token_logprob(document, tokens=tokens)
         )
         # iterate through probabilities by ngram defined by window size at given stride
         ngram_probs = []
         for i in range(0, len(all_prob) - window + 1, stride):
             ngram_prob = all_prob[i : i + window]
+            
             ngram_probs.append(np.mean(ngram_prob))
         min_k_probs = sorted(ngram_probs)[: int(len(ngram_probs) * k)]
 

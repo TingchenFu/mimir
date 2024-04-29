@@ -30,7 +30,7 @@ class GradNormAttack(Attack):
 
         # Get gradients for model parameters
         self.target_model.model.zero_grad()
-        all_prob = self.target_model.get_probabilities(document, tokens=tokens, no_grads=False)
+        all_prob = self.target_model.get_token_logprob(document, tokens=tokens, no_grads=False)
         loss = - ch.mean(all_prob)
         loss.backward()
 

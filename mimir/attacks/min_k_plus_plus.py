@@ -28,7 +28,7 @@ class MinKPlusPlusAttack(Attack):
         target_prob, all_probs = (
             (probs, all_probs)
             if (probs is not None and all_probs is not None)
-            else self.model.get_probabilities(document, tokens=tokens, return_all_probs=True)
+            else self.model.get_token_logprob(document, tokens=tokens, return_all_probs=True)
         )
         
         mu = (ch.exp(all_probs) * all_probs).sum(-1)
