@@ -24,7 +24,7 @@ from mimir.config import (
 import mimir.data_utils as data_utils
 import mimir.plot_utils as plot_utils
 from mimir.utils import fix_seed
-from mimir.my_models import LanguageModel, ReferenceModel, OpenAI_APIModel
+from mimir.my_models import LanguageModel
 from mimir.attacks.all_attacks import AllAttacks, Attack
 from mimir.attacks.utils import get_attacker
 from mimir.attacks.attack_utils import (
@@ -33,7 +33,7 @@ from mimir.attacks.attack_utils import (
     get_auc_from_thresholds,
 )
 
-
+# obtain the attack class 
 def get_attackers(
     target_model,
     ref_models,
@@ -72,7 +72,7 @@ def get_mia_scores(
     attackers_dict: Dict[str, Attack],
     ds_object,
     target_model: LanguageModel,
-    ref_models: Dict[str, ReferenceModel],
+    ref_models: Dict[str, LanguageModel],
     config: ExperimentConfig,
     is_train: bool,
     n_samples: int = None,
@@ -92,7 +92,7 @@ def get_mia_scores(
 
     results = []
     neighbors = None
-    if AllAttacks.NEIGHBOR in attackers_dict.keys() and neigh_config.load_from_cache:
+    if AllAttacks.NEIGHBOR in attackers_dict.keys() and neigh_config.load_from_cache:  # default True
         neighbors = data[f"neighbors"]
         print("Loaded neighbors from cache!")
 
@@ -101,7 +101,7 @@ def get_mia_scores(
     }
 
     # For each batch of data
-    # TODO: Batch-size isn't really "batching" data - change later
+    # TODO: Batch-size isn't really "batching" data - change later......
     for batch in tqdm(range(math.ceil(n_samples / batch_size)), desc=f"Computing criterion"):
         texts = data["records"][batch * batch_size : (batch + 1) * batch_size]
 
@@ -116,7 +116,7 @@ def get_mia_scores(
 
             # This will be a list of integers if pretokenized
             sample_information["sample"] = sample
-            if config.pretokenized:
+            if config.pretokenized: # default False
                 detokenized_sample = [target_model.tokenizer.decode(s) for s in sample]
                 sample_information["detokenized"] = detokenized_sample
 
@@ -125,18 +125,18 @@ def get_mia_scores(
             for i, substr in enumerate(sample):
                 # compute token probabilities for sample
                 s_tk_probs, s_all_probs = (
-                    target_model.get_probabilities(substr, return_all_probs=True)
+                    target_model.get_token_logprob(substr, return_all_probs=True)
                     if not config.pretokenized
-                    else target_model.get_probabilities(
+                    else target_model.get_token_logprob(
                         detokenized_sample[i], tokens=substr, return_all_probs=True
                     )
                 )
 
                 # Always compute LOSS score. Also helpful for reference-based and many other attacks.
                 loss = (
-                    target_model.get_ll(substr, probs=s_tk_probs)
+                    target_model.get_loss(substr, probs=s_tk_probs)
                     if not config.pretokenized
-                    else target_model.get_ll(
+                    else target_model.get_loss(
                         detokenized_sample[i], tokens=substr, probs=s_tk_probs
                     )
                 )
@@ -169,19 +169,20 @@ def get_mia_scores(
                             if neighbors:
                                 substr_neighbors = neighbors[n_perturbation][
                                     batch * batch_size + idx
-                                ][i]
+                                ]#[i]
                             else:
                                 substr_neighbors = attacker.get_neighbors(
                                     [substr], n_perturbations=n_perturbation
                                 )
                                 # Collect this neighbor information if neigh_config.dump_cache is True
-                                if neigh_config.dump_cache:
+                                if neigh_config.dump_cache: # default False
                                     neighbors_within[n_perturbation].append(
                                         substr_neighbors
                                     )
 
-                            if not neigh_config.dump_cache:
+                            if not neigh_config.dump_cache:  # default False
                                 # Only evaluate neighborhood attack when not caching neighbors
+                                # 
                                 score = attacker.attack(
                                     substr,
                                     probs=s_tk_probs,
@@ -199,7 +200,7 @@ def get_mia_scores(
                                     f"{attack}-{n_perturbation}"
                                 ].append(score)
 
-            if neigh_config and neigh_config.dump_cache:
+            if neigh_config and neigh_config.dump_cache:  # default False
                 for n_perturbation in n_perturbation_list:
                     collected_neighbors[n_perturbation].append(
                         neighbors_within[n_perturbation]
@@ -209,7 +210,7 @@ def get_mia_scores(
             # attack into to respective list for its classification
             results.append(sample_information)
 
-    if neigh_config and neigh_config.dump_cache:
+    if neigh_config and neigh_config.dump_cache:  # default False
         # Save p_member_text and p_nonmember_text (Lists of strings) to cache
         # For each perturbation
         for n_perturbation in n_perturbation_list:
@@ -221,7 +222,7 @@ def get_mia_scores(
                 in_place_swap=in_place_swap,
             )
 
-    if neigh_config and neigh_config.dump_cache:
+    if neigh_config and neigh_config.dump_cache:  # default False
         print(
             "Data dumped! Please re-run with load_from_cache set to True in neigh_config"
         )
@@ -252,6 +253,7 @@ def get_mia_scores(
 
     # Rearrange the nesting of the results dict and calculated aggregated score for sample
     # attack -> member/nonmember -> list of scores
+    # dict[str, list[float]]
     samples = []
     predictions = defaultdict(lambda: [])
     for r in results:
@@ -259,7 +261,8 @@ def get_mia_scores(
         for attack, scores in r.items():
             if attack != "sample" and attack != "detokenized":
                 # TODO: Is there a reason for the np.min here?
-                predictions[attack].append(np.min(scores))
+                # The min is for the case where we have multiple substr in a sample and thus multiple scores.
+                predictions[attack].append(np.min(scores).item())
 
     return predictions, samples
 
@@ -360,10 +363,10 @@ def generate_data_processed(
 
             # # add to the data
             # assert len(o.split(' ')) == len(s.split(' '))
-            if not config.full_doc:
+            if not config.full_doc:   # default False
                 seq_lens.append((len(s.split(" ")), len(o.split())))
 
-            if config.tok_by_tok:
+            if config.tok_by_tok:  # default False
                 for tok_cnt in range(len(o.split(" "))):
                     data["nonmember"].append(" ".join(o.split(" ")[: tok_cnt + 1]))
                     data["member"].append(" ".join(s.split(" ")[: tok_cnt + 1]))
@@ -395,13 +398,13 @@ def generate_data_processed(
 
 
 def generate_data(
-    dataset: str,
+    dataset_name: str,
     train: bool = True,
     presampled: str = None,
     specific_source: str = None,
     mask_model_tokenizer = None
 ):
-    data_obj = data_utils.Data(dataset, config=config, presampled=presampled)
+    data_obj = data_utils.Data(dataset_name, config=config, presampled=presampled)
     data = data_obj.load(
         train=train,
         mask_tokenizer=mask_model_tokenizer,
@@ -412,19 +415,21 @@ def generate_data(
 
 
 def main(config: ExperimentConfig):
+    # decompose and construct 4 config
     env_config: EnvironmentConfig = config.env_config
     neigh_config: NeighborhoodConfig = config.neighborhood_config
     ref_config: ReferenceConfig = config.ref_config
     openai_config: OpenAIConfig = config.openai_config
 
-    if openai_config:
-        openAI_model = OpenAI_APIModel(config)
+    # open ai config not used
+    # if openai_config:
+    #     openAI_model = OpenAI_APIModel(config)
 
-    if openai_config is not None:
-        import openai
+    # if openai_config is not None:
+    #     import openai
 
-        assert openai_config.key is not None, "Must provide OpenAI API key"
-        openai.api_key = openai_config.key
+    #     assert openai_config.key is not None, "Must provide OpenAI API key"
+    #     openai.api_key = openai_config.key
 
     START_DATE = datetime.datetime.now().strftime("%Y-%m-%d")
     START_TIME = datetime.datetime.now().strftime("%H-%M-%S-%f")
@@ -441,10 +446,12 @@ def main(config: ExperimentConfig):
     # Add pile source to suffix, if provided
     # TODO: Shift dataset-specific processing to their corresponding classes
     # Results go under target model
-    sf = os.path.join(config.experiment_name, config.base_model.replace("/", "_"))
+    # sf = os.path.join(config.experiment_name, config.base_model.replace("/", "_"))
+    sf = config.base_model.split("/")[-1]
     if config.specific_source is not None:
         processed_source = data_utils.sourcename_process(config.specific_source)
-        sf = os.path.join(sf, processed_source)
+        sf += '_' + processed_source
+
     SAVE_FOLDER = os.path.join(env_config.tmp_results, sf)
 
     new_folder = os.path.join(env_config.results, sf)
@@ -459,7 +466,7 @@ def main(config: ExperimentConfig):
     print(f"Saving results to absolute path: {os.path.abspath(SAVE_FOLDER)}")
 
     if neigh_config:
-        n_perturbation_list = neigh_config.n_perturbation_list
+        n_perturbation_list = neigh_config.n_perturbation_list # default [25]
         in_place_swap = neigh_config.original_tokenization_swap # default true
         # n_similarity_samples = args.n_similarity_samples # NOT USED
 
@@ -471,7 +478,7 @@ def main(config: ExperimentConfig):
     print(f"Using cache dir {cache_dir}")
 
     # generic generative model
-    base_model = LanguageModel(config)
+    base_model = LanguageModel(config, model_name_or_path = config.base_model, device = config.env_config.device)
 
     # reference model if we are doing the ref-based attack
     ref_models = None
@@ -480,7 +487,7 @@ def main(config: ExperimentConfig):
         and AllAttacks.REFERENCE_BASED in config.blackbox_attacks
     ):
         ref_models = {
-            model: ReferenceModel(config, model) for model in ref_config.models
+            model: LanguageModel(config, model_name_or_path = model, device = config.env_config.device_aux) for model in ref_config.models
         }
 
     # Prepare attackers
@@ -515,24 +522,24 @@ def main(config: ExperimentConfig):
         mask_model_tokenizer=mask_model.tokenizer if mask_model else None,
     )
 
-    other_objs, other_nonmembers = None, None
-    if config.dataset_nonmember_other_sources is not None:
-        other_objs, other_nonmembers = [], []
-        for other_name in config.dataset_nonmember_other_sources:
-            data_obj_nonmem_others, data_nonmember_others = generate_data(
-                config.dataset_nonmember,
-                train=False,
-                specific_source=other_name,
-                mask_model_tokenizer=mask_model.tokenizer if mask_model else None,
-            )
-            other_objs.append(data_obj_nonmem_others)
-            other_nonmembers.append(data_nonmember_others)
+    # other_objs, other_nonmembers = None, None 
+    # if config.dataset_nonmember_other_sources is not None:
+    #     other_objs, other_nonmembers = [], []
+    #     for other_name in config.dataset_nonmember_other_sources:
+    #         data_obj_nonmem_others, data_nonmember_others = generate_data(
+    #             config.dataset_nonmember,
+    #             train=False,
+    #             specific_source=other_name,
+    #             mask_model_tokenizer=mask_model.tokenizer if mask_model else None,
+    #         )
+    #         other_objs.append(data_obj_nonmem_others)
+    #         other_nonmembers.append(data_nonmember_others)
 
-    if config.dump_cache and not (config.load_from_cache or config.load_from_hf):
-        print("Data dumped! Please re-run with load_from_cache set to True")
-        exit(0)
+    # if config.dump_cache and not (config.load_from_cache or config.load_from_hf): # NO dump cache
+    #     print("Data dumped! Please re-run with load_from_cache set to True")
+    #     exit(0)
 
-    if config.pretokenized:
+    if config.pretokenized: # default false
         assert data_member.shape == data_nonmember.shape
         data = {
             "nonmember": data_nonmember,
@@ -546,14 +553,16 @@ def main(config: ExperimentConfig):
             batch_size=config.batch_size,
             raw_data_non_member=data_nonmember,
         )
+    print("NEW N_SAMPLES IS ", n_samples)
 
     # If neighborhood attack is used, see if we have cache available (and load from it, if we do)
     neighbors_nonmember, neighbors_member = None, None
     if (
         AllAttacks.NEIGHBOR in config.blackbox_attacks
-        and neigh_config.load_from_cache
+        and neigh_config.load_from_cache  # True
     ):
         neighbors_nonmember, neighbors_member = {}, {}
+        print(f"Loading member neighbor...")
         for n_perturbations in n_perturbation_list:
             neighbors_nonmember[n_perturbations] = data_obj_nonmem.load_neighbors(
                 train=False,
@@ -561,19 +570,19 @@ def main(config: ExperimentConfig):
                 model=neigh_config.model,
                 in_place_swap=in_place_swap,
             )
+            neighbors_nonmember[n_perturbations] = [eval(neighbors_nonmember[n_perturbations][i][0]) for i in range(len(neighbors_nonmember[n_perturbations]))]
             neighbors_member[n_perturbations] = data_obj_mem.load_neighbors(
                 train=True,
                 num_neighbors=n_perturbations,
                 model=neigh_config.model,
                 in_place_swap=in_place_swap,
             )
-
-    print("NEW N_SAMPLES IS ", n_samples)
+            neighbors_member[n_perturbations] = [eval(neighbors_member[n_perturbations][i][0]) for i in range(len(neighbors_member[n_perturbations]))]
 
     if mask_model is not None:
         attacker_ne.create_fill_dictionary(data)
 
-    if config.scoring_model_name:
+    if config.scoring_model_name:  # default None
         print(f"Loading SCORING model {config.scoring_model_name}...")
         del base_model
         # Clear CUDA cache
@@ -586,16 +595,16 @@ def main(config: ExperimentConfig):
     # Add neighbordhood-related data to 'data' here if we want it to be saved in raw data. Otherwise, add jsut before calling attack
 
     # write the data to a json file in the save folder
-    if not config.pretokenized:
-        with open(os.path.join(SAVE_FOLDER, "raw_data.json"), "w") as f:
-            print(f"Writing raw data to {os.path.join(SAVE_FOLDER, 'raw_data.json')}")
-            json.dump(data, f)
+    # if not config.pretokenized: # default False
+    #     with open(os.path.join(SAVE_FOLDER, "raw_data.json"), "w") as f:
+    #         print(f"Writing raw data to {os.path.join(SAVE_FOLDER, 'raw_data.json')}")
+    #         json.dump(data, f)
 
-        with open(os.path.join(SAVE_FOLDER, "raw_data_lens.json"), "w") as f:
-            print(
-                f"Writing raw data to {os.path.join(SAVE_FOLDER, 'raw_data_lens.json')}"
-            )
-            json.dump(seq_lens, f)
+    #     with open(os.path.join(SAVE_FOLDER, "raw_data_lens.json"), "w") as f:
+    #         print(
+    #             f"Writing raw data to {os.path.join(SAVE_FOLDER, 'raw_data_lens.json')}"
+    #         )
+    #         json.dump(seq_lens, f)
 
     # TODO: Remove below if not needed/used
     """
@@ -620,6 +629,7 @@ def main(config: ExperimentConfig):
         raise ValueError("No blackbox attacks specified in config!")
 
     # Collect scores for members
+    # why re-collect the member samples
     member_preds, member_samples = get_mia_scores(
         data_members,
         attackers_dict,
@@ -631,6 +641,7 @@ def main(config: ExperimentConfig):
         n_samples=n_samples
     )
     # Collect scores for non-members
+    # why re-collect the non-member samples
     nonmember_preds, nonmember_samples = get_mia_scores(
         data_nonmembers,
         attackers_dict,
@@ -651,63 +662,72 @@ def main(config: ExperimentConfig):
 
     # TODO: For now, AUCs for other sources of non-members are only printed (not saved)
     # Will fix later!
-    if config.dataset_nonmember_other_sources is not None:
-        # Using thresholds returned in blackbox_outputs, compute AUCs and ROC curves for other non-member sources
-        for other_obj, other_nonmember, other_name in zip(
-            other_objs, other_nonmembers, config.dataset_nonmember_other_sources
-        ):
-            other_nonmem_preds, _ = get_mia_scores(
-                other_nonmember,
-                attackers_dict,
-                other_obj,
-                target_model=base_model,
-                ref_models=ref_models,
-                config=config,
-                is_train=False,
-                n_samples=n_samples,
-            )
+    # if config.dataset_nonmember_other_sources is not None:
+    #     # Using thresholds returned in blackbox_outputs, compute AUCs and ROC curves for other non-member sources
+    #     for other_obj, other_nonmember, other_name in zip(
+    #         other_objs, other_nonmembers, config.dataset_nonmember_other_sources
+    #     ):
+    #         other_nonmem_preds, _ = get_mia_scores(
+    #             other_nonmember,
+    #             attackers_dict,
+    #             other_obj,
+    #             target_model=base_model,
+    #             ref_models=ref_models,
+    #             config=config,
+    #             is_train=False,
+    #             n_samples=n_samples,
+    #         )
 
-            for attack in blackbox_outputs.keys():
-                member_scores = np.array(
-                    member_preds[attack]["predictions"]["member"]
-                )
-                thresholds = blackbox_outputs[attack]["metrics"]["thresholds"]
-                nonmember_scores = np.array(other_nonmem_preds[attack])
-                auc = get_auc_from_thresholds(
-                    member_scores, nonmember_scores, thresholds
-                )
-                print(
-                    f"AUC using thresholds of original split on {other_name} using {attack}: {auc}"
-                )
-        exit(0)
+    #         for attack in blackbox_outputs.keys():
+    #             member_scores = np.array(
+    #                 member_preds[attack]["predictions"]["member"]
+    #             )
+    #             thresholds = blackbox_outputs[attack]["metrics"]["thresholds"]
+    #             nonmember_scores = np.array(other_nonmem_preds[attack])
+    #             auc = get_auc_from_thresholds(
+    #                 member_scores, nonmember_scores, thresholds
+    #             )
+    #             print(
+    #                 f"AUC using thresholds of original split on {other_name} using {attack}: {auc}"
+    #             )
+    #     exit(0)
 
     # Dump main config into SAVE_FOLDER
     config.save_json(os.path.join(SAVE_FOLDER, 'config.json'), indent=4)
 
     for attack, output in blackbox_outputs.items():
-        outputs.append(output)
+        output.pop('predictions', None)
+        output.pop('raw_results', None)
+        output.pop('loss', None)
+        output['metrics'].pop('fpr')
+        output['metrics'].pop('tpr')
+        output['metrics'].pop('thresholds')
+        output['pr_metrics'].pop('precision')
+        output['pr_metrics'].pop('recall')
         with open(os.path.join(SAVE_FOLDER, f"{attack}_results.json"), "w") as f:
             json.dump(output, f)
 
-    neighbor_model_name = neigh_config.model if neigh_config else None
-    plot_utils.save_roc_curves(
-        outputs,
-        save_folder=SAVE_FOLDER,
-        model_name=base_model_name,
-        neighbor_model_name=neighbor_model_name,
-    )
-    plot_utils.save_ll_histograms(outputs, save_folder=SAVE_FOLDER)
-    plot_utils.save_llr_histograms(outputs, save_folder=SAVE_FOLDER)
+    
+    
+    
+    # plot_utils.save_roc_curves(
+    #     outputs,
+    #     save_folder = SAVE_FOLDER,
+    #     model_name = base_model_name,
+    #     neighbor_model_name = neigh_config.model if neigh_config else None,
+    # )
+    # plot_utils.save_ll_histograms(outputs, save_folder=SAVE_FOLDER)
+    # plot_utils.save_llr_histograms(outputs, save_folder=SAVE_FOLDER)
 
     # move results folder from env_config.tmp_results to results/, making sure necessary directories exist
-    if not os.path.exists(os.path.dirname(new_folder)):
-        os.makedirs(os.path.dirname(new_folder))
-    os.rename(SAVE_FOLDER, new_folder)
+    # if not os.path.exists(os.path.dirname(new_folder)):
+    #     os.makedirs(os.path.dirname(new_folder))
+    # os.rename(SAVE_FOLDER, new_folder)
 
-    api_calls = 0
-    if openai_config:
-        api_calls = openai_config.api_calls
-        print(f"Used an *estimated* {api_calls} API tokens (may be inaccurate)")
+    # api_calls = 0
+    # if openai_config:
+    #     api_calls = openai_config.api_calls
+    #     print(f"Used an *estimated* {api_calls} API tokens (may be inaccurate)")
 
 
 if __name__ == "__main__":
@@ -726,6 +746,5 @@ if __name__ == "__main__":
     # Fix randomness
     fix_seed(config.random_seed)
     print(config)
-    exit()
     # Call main function
     main(config)
