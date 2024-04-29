@@ -65,7 +65,7 @@ def load_cached(cache_dir,
                 else:
                     # remove the first underscore
                     split = split[1:]
-                    # remove '<' , '>'
+                    # Remove '<' , '>' # then how to tell apart > and <?
                     split = split.replace("<", "").replace(">", "")
                     # Remove "_truncated" from the end, if present
                     split = split.rsplit("_truncated", 1)[0]

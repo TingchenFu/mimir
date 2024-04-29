@@ -22,7 +22,7 @@ class Data:
         self.name = name
         self.presampled = presampled
         self.key = (
-            config.dataset_key
+            config.dataset_key # default None
             if config.dataset_key
             else self.name_key_mapping.get(name, None)
         )
@@ -95,14 +95,14 @@ class Data:
         n_samples = self.config.n_samples
 
         # Load from numpy file storing pretokenized sample in a 2d array of shape (num_samples, num_tokens_per_sample)
-        if self.config.pretokenized:
+        if self.config.pretokenized: # default False 
             assert self.presampled
             # TODO: Pretokenized full documents (split into substrs) is not currently supported
             assert not self.config.full_doc
             data = np.load(self.presampled)
             return data
-        elif (self.config.load_from_cache or self.config.load_from_hf):
-            # Load from cache, if requested
+        elif (self.config.load_from_cache or self.config.load_from_hf): # default False and True
+            # Load from cache, if requested; If there is no cache 
             filename = self._get_name_to_save()
             data = custom_datasets.load_cached(
                 self.cache_dir,
@@ -158,7 +158,9 @@ class Data:
                     self.name, split=f"train", cache_dir=self.cache_dir
                 )[self.key]
 
-        if not self.config.full_doc:
+
+        # data processing process
+        if not self.config.full_doc: # default false
             # get unique examples
             # then take just the long examples, shuffle, take the first 5,000 to tokenize to save time
             # then take just the examples that are <= 512 tokens (for the mask model)
@@ -181,7 +183,7 @@ class Data:
             if len(whitespace_tokenized_spans) == 0:
                 raise ValueError("No examples with length >= min_words")
 
-            if self.config.max_words_cutoff:
+            if self.config.max_words_cutoff: # default True
                 last_spans = [
                     x[1][min(self.config.max_words, len(x[1])) - 1][1]
                     for x in whitespace_tokenized_spans
@@ -244,7 +246,7 @@ class Data:
         data = data[:n_samples]
 
         # Save to cache (if requested)
-        if self.config.dump_cache:
+        if self.config.dump_cache: # default False
             self.dump_to_cache(data, data_split)
 
         return data

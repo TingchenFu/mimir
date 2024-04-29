@@ -81,9 +81,9 @@ class EnvironmentConfig(Serializable):
     """Use int8 quantization?"""
     half: Optional[bool] = False
     """Use half precision?"""
-    results: Optional[str] = "results"
+    results: Optional[str] = "dump"
     """Path for saving final results"""
-    tmp_results: Optional[str] = "tmp_results"
+    tmp_results: Optional[str] = "tmp_dump"
 
     def __post_init__(self):
         if self.cache_dir is None:
