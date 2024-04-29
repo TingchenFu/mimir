@@ -11,9 +11,9 @@ import time
 from collections import defaultdict
 from multiprocessing.pool import ThreadPool
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForCausalLM
 # from hf_olmo import *
-
+import math
 from mimir.config import ExperimentConfig
 from mimir.custom_datasets import SEPARATOR
 from mimir.data_utils import drop_last_word
@@ -86,30 +86,30 @@ class Model(nn.Module):
                 list: A list of probabilities.
         """
         with torch.set_grad_enabled(not no_grads):
-            if self.device is None or self.name is None:
+            if self.device is None:
                 raise ValueError("Please set self.device and self.name in child class")
 
             if tokens is not None:
-                labels = torch.from_numpy(tokens.astype(np.int64)).type(torch.LongTensor)
-                if labels.shape[0] != 1:
+                input_ids = torch.from_numpy(tokens.astype(np.int64)).type(torch.LongTensor)
+                if input_ids.shape[0] != 1:
                     # expand first dimension
-                    labels = labels.unsqueeze(0)
+                    input_ids = input_ids.unsqueeze(0)
             else:
                 tokenized = self.tokenizer(
                     text, return_tensors="pt")
-                labels = tokenized.input_ids
+                input_ids = tokenized.input_ids
 
-            target_log_prob = []
-            all_log_prob = []
-            for i in range(0, labels.size(1), self.stride):
+            target_token_log_prob = []
+            all_token_log_prob = []
+            for i in range(0, input_ids.size(1), self.stride):
                 begin_loc = max(i + self.stride - self.max_length, 0)
-                end_loc = min(i + self.stride, labels.size(1))
+                end_loc = min(i + self.stride, input_ids.size(1))
                 trg_len = end_loc - i  # may be different from stride on last loop
-                input_ids = labels[:, begin_loc:end_loc].to(self.device)
+                segment_input_ids = input_ids[:, begin_loc:end_loc].to(self.device)
                 #target_ids = input_ids.clone()
                 #target_ids[:, :-trg_len] = -100
 
-                logits = self.model(input_ids).logits
+                logits = self.model(segment_input_ids).logits
                 if no_grads:
                     logits = logits.cpu()
                 logits = logits[0,:-1,:].contiguous()
@@ -118,29 +118,29 @@ class Model(nn.Module):
                 #(bs=1, vocab_size)
                 #shift_logits = logits[..., :-1, :].contiguous()
                 #(bs=1, vocab_size)
-                log_probabilities = torch.nn.functional.log_softmax(logits, dim=-1)
+                log_prob = torch.nn.functional.log_softmax(logits, dim=-1)
                 # shift_labels = target_ids[..., 1:]
                 # if no_grads:
                 #     shift_labels = shift_labels.cpu()
                 # shift_labels = shift_labels.contiguous()
                 # labels_processed = shift_labels[0]
 
-                target_ids = labels[0, begin_loc:end_loc]
+                target_ids = input_ids[0, begin_loc:end_loc]
                 target_ids = target_ids[1:]
                 target_ids = target_ids[-trg_len:]
                 assert target_ids.shape[0] == logits.shape[0]
 
-                segment_target_log_prob = torch.gather(log_probabilities, 1, target_ids.unsqueeze(1)).squeeze(1)
-                target_log_prob.append(segment_target_log_prob)
-                all_log_prob.append(log_probabilities)
+                segment_target_log_prob = torch.gather(log_prob, 1, target_ids.unsqueeze(1)).squeeze(1)
+                target_token_log_prob.append(segment_target_log_prob)
+                all_token_log_prob.append(log_prob)
 
-            target_log_prob = torch.cat(target_log_prob, dim=0)
-            all_log_prob = torch.cat(all_log_prob, dim=0)
-            
+            target_token_log_prob = torch.cat(target_token_log_prob, dim=0).to(torch.float32).numpy()
+            all_token_log_prob = torch.cat(all_token_log_prob, dim=0).to(torch.float32).numpy()
+
+
             if not return_all_probs:
-                return target_log_prob 
-            return target_log_prob, all_log_prob
-                
+                return target_token_log_prob 
+            return target_token_log_prob, all_token_log_prob
 
 
                 # del input_ids
@@ -181,128 +181,129 @@ class Model(nn.Module):
                 probs (list, optional): An optional list of probabilities. If provided, these probabilities
                 are used instead of calling the `get_probabilities` method. Defaults to None.
         """
-        all_prob = probs if probs is not None else self.get_probabilities(text, tokens=tokens)
+        all_prob = probs if probs is not None else self.get_token_logprob(text, tokens=tokens)
         # return -np.mean(all_prob)
-        if isinstance(all_prob,torch.tensor):
+        if isinstance(all_prob,torch.Tensor):
             return -torch.mean(all_prob).item()
-        elif isinstance(all_prob,list):
-            return -np.mean(all_prob)  
+        else: # numpy or list
+            return float(-np.mean(all_prob))
 
         
 
-    def load_base_model_and_tokenizer(self, model_kwargs):
-        """
-            Load the base model and tokenizer for a given model name.
-        """
-        if self.device is None or self.name is None:
-            raise ValueError("Please set self.device and self.name in child class")
+    # def load_base_model_and_tokenizer(self, model_kwargs):
+    #     """
+    #         Load the base model and tokenizer for a given model name.
+    #     """
+    #     if self.device is None or self.name is None:
+    #         raise ValueError("Please set self.device and self.name in child class")
 
-        if self.config.openai_config is None:
-            print(f'Loading BASE model {self.name}...')
-            device_map = self.device_map # if self.device_map else 'cpu'
-            if "silo" in self.name or "balanced" in self.name:
-                raise NotImplementedError
-            #     from utils.transformers.model import OpenLMforCausalLM
-            #     model = OpenLMforCausalLM.from_pretrained(
-            #         self.name, **model_kwargs, device_map=self.device, cache_dir=self.cache_dir)
-            #     # Extract the model from the model wrapper so we dont need to call model.model
-            elif "llama" in self.name or "alpaca" in self.name:
-                # TODO: This should be smth specified in config in case user has
-                # llama is too big, gotta use device map
-                model = transformers.AutoModelForCausalLM.from_pretrained(self.name, **model_kwargs, cache_dir=self.cache_dir)
-                self.device = 'cuda:1'
-            elif "stablelm" in self.name.lower():  # models requiring custom code
-                model = transformers.AutoModelForCausalLM.from_pretrained(
-                    self.name, **model_kwargs, trust_remote_code=True, device_map=device_map, cache_dir=self.cache_dir)
-            elif "olmo" in self.name.lower():
-                model = transformers.AutoModelForCausalLM.from_pretrained(
-                    self.name, **model_kwargs, trust_remote_code=True, cache_dir=self.cache_dir)
-            else:
-                model = transformers.AutoModelForCausalLM.from_pretrained(
-                    self.name, **model_kwargs, device_map=device_map, cache_dir=self.cache_dir)
-        else:
-            model = None
+    #     if self.config.openai_config is None:
+    #         print(f'Loading BASE model {self.name}...')
+    #         device_map = self.device_map # if self.device_map else 'cpu'
+    #         if "silo" in self.name or "balanced" in self.name:
+    #             raise NotImplementedError
+    #         #     from utils.transformers.model import OpenLMforCausalLM
+    #         #     model = OpenLMforCausalLM.from_pretrained(
+    #         #         self.name, **model_kwargs, device_map=self.device, cache_dir=self.cache_dir)
+    #         #     # Extract the model from the model wrapper so we dont need to call model.model
+    #         elif "llama" in self.name or "alpaca" in self.name:
+    #             # TODO: This should be smth specified in config in case user has
+    #             # llama is too big, gotta use device map
+    #             model = transformers.AutoModelForCausalLM.from_pretrained(self.name, **model_kwargs, cache_dir=self.cache_dir)
+    #             self.device = 'cuda:1'
+    #         elif "stablelm" in self.name.lower():  # models requiring custom code
+    #             model = transformers.AutoModelForCausalLM.from_pretrained(
+    #                 self.name, **model_kwargs, trust_remote_code=True, device_map=device_map, cache_dir=self.cache_dir)
+    #         elif "olmo" in self.name.lower():
+    #             model = transformers.AutoModelForCausalLM.from_pretrained(
+    #                 self.name, **model_kwargs, trust_remote_code=True, cache_dir=self.cache_dir)
+    #         else:
+    #             model = transformers.AutoModelForCausalLM.from_pretrained(
+    #                 self.name, **model_kwargs, device_map=device_map, cache_dir=self.cache_dir)
+    #     else:
+    #         model = None
 
-        optional_tok_kwargs = {}
-        if "facebook/opt-" in self.name:
-            print("Using non-fast tokenizer for OPT")
-            optional_tok_kwargs['fast'] = False
-        if self.config.dataset_member in ['pubmed'] or self.config.dataset_nonmember in ['pubmed']:
-            optional_tok_kwargs['padding_side'] = 'left'
-            self.pad_token = self.tokenizer.eos_token_id
-        if "silo" in self.name or "balanced" in self.name:
-            tokenizer = transformers.GPTNeoXTokenizerFast.from_pretrained(
-                "EleutherAI/gpt-neox-20b", **optional_tok_kwargs, cache_dir=self.cache_dir)
-        elif "datablations" in self.name:
-            tokenizer = transformers.AutoTokenizer.from_pretrained(
-                "gpt2", **optional_tok_kwargs, cache_dir=self.cache_dir)
-        elif "llama" in self.name or "alpaca" in self.name:
-            tokenizer = transformers.LlamaTokenizer.from_pretrained(
-                self.name, **optional_tok_kwargs, cache_dir=self.cache_dir)
-        elif "pubmedgpt" in self.name:
-            tokenizer = transformers.AutoTokenizer.from_pretrained(
-                "stanford-crfm/BioMedLM", **optional_tok_kwargs, cache_dir=self.cache_dir)
-        else:
-            tokenizer = transformers.AutoTokenizer.from_pretrained(
-                self.name, **optional_tok_kwargs, cache_dir=self.cache_dir,
-                trust_remote_code=True if "olmo" in self.name.lower() else False)
-        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    #     optional_tok_kwargs = {}
+    #     if "facebook/opt-" in self.name:
+    #         print("Using non-fast tokenizer for OPT")
+    #         optional_tok_kwargs['fast'] = False
+    #     if self.config.dataset_member in ['pubmed'] or self.config.dataset_nonmember in ['pubmed']:
+    #         optional_tok_kwargs['padding_side'] = 'left'
+    #         self.pad_token = self.tokenizer.eos_token_id
+    #     if "silo" in self.name or "balanced" in self.name:
+    #         tokenizer = transformers.GPTNeoXTokenizerFast.from_pretrained(
+    #             "EleutherAI/gpt-neox-20b", **optional_tok_kwargs, cache_dir=self.cache_dir)
+    #     elif "datablations" in self.name:
+    #         tokenizer = transformers.AutoTokenizer.from_pretrained(
+    #             "gpt2", **optional_tok_kwargs, cache_dir=self.cache_dir)
+    #     elif "llama" in self.name or "alpaca" in self.name:
+    #         tokenizer = transformers.LlamaTokenizer.from_pretrained(
+    #             self.name, **optional_tok_kwargs, cache_dir=self.cache_dir)
+    #     elif "pubmedgpt" in self.name:
+    #         tokenizer = transformers.AutoTokenizer.from_pretrained(
+    #             "stanford-crfm/BioMedLM", **optional_tok_kwargs, cache_dir=self.cache_dir)
+    #     else:
+    #         tokenizer = transformers.AutoTokenizer.from_pretrained(
+    #             self.name, **optional_tok_kwargs, cache_dir=self.cache_dir,
+    #             trust_remote_code=True if "olmo" in self.name.lower() else False)
+    #     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
-        return model, tokenizer
+    #     return model, tokenizer
 
-    def load_model_properties(self):
-        """
-            Load model properties, such as max length and stride.
-        """
-        # TODO: getting max_length of input could be more generic
-        if "silo" in self.name or "balanced" in self.name:
-            self.max_length = self.model.model.seq_len
-        elif hasattr(self.model.config, 'max_position_embeddings'):
-            self.max_length = self.model.config.max_position_embeddings
-        elif hasattr(self.model.config, 'n_positions'):
-            self.max_length = self.model.config.n_positions
-        else:
-            # Default window size
-            self.max_length = 1024
-        self.stride = self.max_length // 2
+    # def load_model_properties(self):
+    #     """
+    #         Load model properties, such as max length and stride.
+    #     """
+    #     # TODO: getting max_length of input could be more generic
+    #     if "silo" in self.name or "balanced" in self.name:
+    #         self.max_length = self.model.model.seq_len
+    #     elif hasattr(self.model.config, 'max_position_embeddings'):
+    #         self.max_length = self.model.config.max_position_embeddings
+    #     elif hasattr(self.model.config, 'n_positions'):
+    #         self.max_length = self.model.config.n_positions
+    #     else:
+    #         # Default window size
+    #         self.max_length = 1024
+    #     self.stride = self.max_length // 2
 
 
-class ReferenceModel(Model):
-    """
-        Wrapper for reference model
-    """
-    def __init__(self, config: ExperimentConfig, name: str):
-        super().__init__(config)
-        self.device = self.config.env_config.device_aux
-        self.name = name
-        base_model_kwargs = {'revision': 'main'}
-        if 'gpt-j' in self.name or 'neox' in self.name or 'llama' in self.name or 'alpaca' in self.name:
-            base_model_kwargs.update(dict(torch_dtype=torch.float16))
-        if 'gpt-j' in self.name:
-            base_model_kwargs.update(dict(revision='float16'))
-        if ':' in self.name:
-            print("Applying ref model revision")
-            # Allow them to provide revisions as part of model name, then parse accordingly
-            split = self.name.split(':')
-            self.name = split[0]
-            base_model_kwargs.update(dict(revision=split[-1]))
-        self.model, self.tokenizer = self.load_base_model_and_tokenizer(
-            model_kwargs=base_model_kwargs)
-        self.load_model_properties()
+# why do we need reference model?
+# class ReferenceModel(Model):
+#     """
+#         Wrapper for reference model
+#     """
+#     def __init__(self, config: ExperimentConfig, name: str):
+#         super().__init__(config)
+#         self.device = self.config.env_config.device_aux
+#         self.name = name
+#         base_model_kwargs = {'revision': 'main'}
+#         if 'gpt-j' in self.name or 'neox' in self.name or 'llama' in self.name or 'alpaca' in self.name:
+#             base_model_kwargs.update(dict(torch_dtype=torch.float16))
+#         if 'gpt-j' in self.name:
+#             base_model_kwargs.update(dict(revision='float16'))
+#         if ':' in self.name:
+#             print("Applying ref model revision")
+#             # Allow them to provide revisions as part of model name, then parse accordingly
+#             split = self.name.split(':')
+#             self.name = split[0]
+#             base_model_kwargs.update(dict(revision=split[-1]))
+#         self.model, self.tokenizer = self.load_base_model_and_tokenizer(
+#             model_kwargs=base_model_kwargs)
+#         self.load_model_properties()
 
-    def load(self):
-        """
-        Load reference model noto GPU(s)
-        """
-        if "llama" not in self.name and "alpaca" not in self.name:
-            super().load()
+#     def load(self):
+#         """
+#         Load reference model noto GPU(s)
+#         """
+#         if "llama" not in self.name and "alpaca" not in self.name:
+#             super().load()
 
-    def unload(self):
-        """
-        Unload reference model from GPU(s)
-        """
-        if "llama" not in self.name and "alpaca" not in self.name:
-            super().unload()
+#     def unload(self):
+#         """
+#         Unload reference model from GPU(s)
+#         """
+#         if "llama" not in self.name and "alpaca" not in self.name:
+#             super().unload()
 
 
 class QuantileReferenceModel(Model):
@@ -328,27 +329,38 @@ class LanguageModel(Model):
     """
         Generic LM- used most often for target model
     """
-    def __init__(self, config: ExperimentConfig, **kwargs):
+    def __init__(self, config: ExperimentConfig, model_name_or_path: str, device: str, device_map = None,  **kwargs):
         super().__init__(config, **kwargs)
-        self.device = self.config.env_config.device
-        self.device_map = self.config.env_config.device_map
+        self.device = device
+        self.device_map = device_map
+
         # Use provided name (if provided)
         # Relevant for scoring-model scenario
-        self.name = self.kwargs.get('name', self.config.base_model)
+        # self.name = self.kwargs.get('name', self.config.base_model)
 
-        base_model_kwargs = {}
-        if config.revision:
-            base_model_kwargs.update(dict(revision=config.revision))
-        if 'gpt-j' in self.name or 'neox' in self.name:
-            base_model_kwargs.update(dict(torch_dtype=torch.float16))
-        if 'gpt-j' in self.name:
-            base_model_kwargs.update(dict(revision='float16'))
-        self.model, self.tokenizer = self.load_base_model_and_tokenizer(
-            model_kwargs=base_model_kwargs)
-        self.load_model_properties()
+        # base_model_kwargs = {}
+        # if config.revision:
+        #     base_model_kwargs.update(dict(revision=config.revision))
+        # if 'gpt-j' in self.name or 'neox' in self.name:
+        #     base_model_kwargs.update(dict(torch_dtype=torch.float16))
+        # if 'gpt-j' in self.name:
+        #     base_model_kwargs.update(dict(revision='float16'))
+        # self.model, self.tokenizer = self.load_base_model_and_tokenizer(
+        #     model_kwargs=base_model_kwargs)
+        # self.load_model_properties()
+
+        self.model = AutoModelForCausalLM.from_pretrained(model_name_or_path,
+                                                        torch_dtype=torch.bfloat16,
+                                                        trust_remote_code=True,
+                                                        quantization_config=None,
+                                                    )
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+        self.max_length = self.model.config.max_position_embeddings
+        self.stride = self.max_length // 2
 
     @torch.no_grad()
-    def get_ref(self, text: str, ref_model: ReferenceModel, tokens=None, probs=None):
+    def get_ref(self, text: str, ref_model: Model, tokens=None, probs=None):
         """
             Compute the loss of a given text calibrated against the text's loss under a reference model -- MIA baseline
         """
@@ -393,11 +405,13 @@ class LanguageModel(Model):
         # labels = tokenized.input_ids
         total_size = len(texts)
         target_logprob = defaultdict(list)
-        losses = []
-        for batch_idx in range(0, total_size, batch_size):
+        from tqdm import tqdm
+
+        for batch_idx in range(math.ceil(total_size / batch_size)):
+        #for batch_idx in range(0, total_size, batch_size):
             # Delegate batches and tokenize
-            batch = texts[batch_idx: batch_idx+batch_size]
-            # no max_length no truncation
+            batch = texts[batch_idx * batch_size: (batch_idx + 1) * batch_size]
+            # no max_leng th no truncation
             tokenized = self.tokenizer(batch, return_tensors="pt", padding=True, return_attention_mask=True)
             batch_input_id = tokenized.input_ids
             batch_attention_mask = tokenized.attention_mask
@@ -413,7 +427,7 @@ class LanguageModel(Model):
             # Collect token probabilities per sample in batch
             for segment_idx in range(0, batch_input_id.size(1), self.stride):
                 begin_loc = max(segment_idx + self.stride - self.max_length, 0)
-                end_loc = min(segment_idx + self.stride, label_batch.size(1))
+                end_loc = min(segment_idx + self.stride, batch_input_id.size(1))
                 trg_len = end_loc - segment_idx  # may be different from stride on last loop
                 segment_input_ids = batch_input_id[:, begin_loc:end_loc]
                 segment_attention_mask = batch_attention_mask[:, begin_loc:end_loc]
@@ -426,33 +440,33 @@ class LanguageModel(Model):
                 #target_ids[:, :-trg_len] = -100
                 # target_ids[attention_mask == 0] = -100
                 logits = self.model(input_ids = segment_input_ids.to(self.device), attention_mask = segment_attention_mask.to(self.device)).logits.cpu()
-
+                # process every case in the batch
                 for i in range(logits.size(0)):
                     # begin to deal each instance in the current batch and current segment
                     rel_len = torch.sum(segment_attention_mask[i],dim=0).item()
-                    if rel_len <= self.stride + 1:
+                    if  segment_idx > 0 and rel_len <= self.stride + 1   :
                         continue
-                    logits = logits[i,:rel_len,:]
-                    shift_logits = logits[:-1, :].contiguous()
+                    shift_logits = logits[i,:rel_len,:]
+                    shift_logits = shift_logits[:-1, :].contiguous()
+                    shift_logits = shift_logits[-trg_len:,:]
                     probabilities = torch.nn.functional.log_softmax(shift_logits, dim=-1)
-                    probabilities = probabilities[-trg_len:,:].contiguous()
                     
                     labels = segment_input_ids[i, :rel_len]
                     shift_labels = labels[1:]
-                    shift_labels = labels[i, -trg_len:].contiguous()
-                    assert shift_labels.shape[0] == probabilities.shape[0]
+                    shift_labels = shift_labels[-trg_len:].contiguous()
+                    assert shift_labels.shape[0] == probabilities.shape[0], "shift_label {} != probabilities {}, rel len {} actual len {} ".format(shift_labels.shape[0], probabilities.shape[0], rel_len, len(segment_input_ids[i]))
 
                     segment_target_logprob = torch.gather(probabilities, 1, shift_labels.unsqueeze(1)).squeeze(1).tolist()
-                    target_logprob[batch_idx*batch_size + i].extend(segment_target_logprob) 
+                    target_logprob[batch_idx * batch_size + i].extend(segment_target_logprob)
+                    # print("update target logprob {}, batch idx {}  i{}   ".format(batch_idx * batch_size + i, batch_idx, i))
                     # for i, sample in enumerate(shift_labels):
                     #     for j, token_id in enumerate(sample):
                     #         if token_id != -100 and token_id != self.tokenizer.pad_token_id:
                     #             probability = probabilities[i, j, token_id].item()
                     #             all_prob[i].append(probability)
-
-
                     # del input_ids
                     # del mask
+        assert len(target_logprob) == len(texts), "the logprob size {} != text size {}".format(len(target_logprob), len(texts))
         return target_logprob
 
 
@@ -580,112 +594,3 @@ class LanguageModel(Model):
         assert len(all_prob) == labels.size(1) - 1
         return -np.mean(all_prob)
 
-
-class OpenAI_APIModel(LanguageModel):
-    """
-        Wrapper for OpenAI API calls
-    """
-    def __init__(self, config: ExperimentConfig, **kwargs):
-        super().__init__(config, **kwargs)
-        self.model = None
-        self.tokenizer = transformers.GPT2Tokenizer.from_pretrained('gpt2', cache_dir=self.cache_dir)
-        self.API_TOKEN_COUNTER = 0
-    
-    @property
-    def api_calls(self):
-        """
-            Get the number of tokens used in API calls
-        """
-        return self.API_TOKEN_COUNTER
-
-    # @torch.no_grad()
-    # def get_ll(self, text: str):
-    #     """
-    #         Get the log likelihood of each text under the base_model
-    #     """
-    #     openai_config = self.config.openai_config
-
-    #     kwargs = {"engine": openai_config.model, "temperature": 0, "max_tokens": 0, "echo": True, "logprobs": 0}
-    #     r = openai.Completion.create(prompt=f"<|endoftext|>{text}", **kwargs)
-    #     result = r['choices'][0]
-    #     tokens, logprobs = result["logprobs"]["tokens"][1:], result["logprobs"]["token_logprobs"][1:]
-
-    #     assert len(tokens) == len(logprobs), f"Expected {len(tokens)} logprobs, got {len(logprobs)}"
-
-    #     return np.mean(logprobs)
-
-    @torch.no_grad()
-    def get_ref(self, text: str, ref_model: ReferenceModel):
-        """
-            Get the  likelihood ratio of each text under the base_model -- MIA baseline
-        """
-        raise NotImplementedError("OpenAI model not implemented for LIRA")
-        openai_config = self.config.openai_config
-        kwargs = {"engine": openai_config.model, "temperature": 0,
-                    "max_tokens": 0, "echo": True, "logprobs": 0}
-        r = openai.Completion.create(prompt=f"<|endoftext|>{text}", **kwargs)
-        result = r['choices'][0]
-        tokens, logprobs = result["logprobs"]["tokens"][1:], result["logprobs"]["token_logprobs"][1:]
-
-        assert len(tokens) == len(logprobs), f"Expected {len(tokens)} logprobs, got {len(logprobs)}"
-
-        return np.mean(logprobs)
-
-    def get_lls(self, texts: str):
-
-        # use GPT2_TOKENIZER to get total number of tokens
-        total_tokens = sum(len(self.tokenizer.encode(text)) for text in texts)
-        self.API_TOKEN_COUNTER += total_tokens * 2  # multiply by two because OpenAI double-counts echo_prompt tokens
-
-        pool = ThreadPool(self.config.batch_size)
-        return pool.map(self.get_ll, texts)
-
-    # def _openai_sample(self, p: str):
-    #     openai_config = self.config.openai_config
-    #     if self.config.dataset_member != 'pubmed':  # keep Answer: prefix for pubmed
-    #         p = drop_last_word(p)
-
-    #     # sample from the openai model
-    #     kwargs = { "engine": openai_config.model, "max_tokens": 200 }
-    #     if self.config.do_top_p:
-    #         kwargs['top_p'] = self.config.top_p
-    
-    #     r = openai.Completion.create(prompt=f"{p}", **kwargs)
-    #     return p + r['choices'][0].text
-
-
-    def sample_from_model(self, texts: List[str], **kwargs):
-        """
-            Sample from base_model using ****only**** the first 30 tokens in each example as context
-        """
-        prompt_tokens = kwargs.get('prompt_tokens', 30)
-        base_tokenizer = kwargs.get('base_tokenizer', None)
-        if base_tokenizer is None:
-            raise ValueError("Please provide base_tokenizer")
-
-        # encode each text as a list of token ids
-        if self.config.dataset_member == 'pubmed':
-            texts = [t[:t.index(SEPARATOR)] for t in texts]
-            all_encoded = base_tokenizer(texts, return_tensors="pt", padding=True).to(self.device)
-        else:
-            all_encoded = base_tokenizer(texts, return_tensors="pt", padding=True).to(self.device)
-            all_encoded = {key: value[:, :prompt_tokens] for key, value in all_encoded.items()}
-
-        # decode the prefixes back into text
-        prefixes = base_tokenizer.batch_decode(all_encoded['input_ids'], skip_special_tokens=True)
-        pool = ThreadPool(self.config.batch_size)
-
-        decoded = pool.map(self._openai_sample, prefixes)
-
-        # count total number of tokens with GPT2_TOKENIZER
-        total_tokens = sum(len(self.tokenizer.encode(x)) for x in decoded)
-        self.API_TOKEN_COUNTER += total_tokens
-
-        return decoded
-    
-    @torch.no_grad()
-    def get_entropy(self, text: str):
-        """
-            Get average entropy of each token in the text
-        """
-        raise NotImplementedError("get_entropy not implemented for OpenAI models")
